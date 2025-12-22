@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: ai-intelligent-tourism
+  profiles:
+    active: local
+  datasource:
+    url: xxxxxxxxxxxxxxxxxxxx
+    username: postgres
+    password: xxxxxx
+    driver-class-name: org.postgresql.Driver
+  ai:
+    chat:
+      memory:
+        repository:
+          jdbc:
+            initialize-schema: always
+    vectorstore:
+      pgvector:
+        index-type: HNSW
+        dimensions: 1536
+        distance-type: COSINE_DISTANCE
+        max-document-batch-size: 10000
+        initialize-schema: true
+
+
+server:
+  port: 8123
+  servlet:
+    context-path: /api
+
+
+# springdoc-openapi
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  group-configs:
+    - group: 'default'
+      paths-to-match: '/**'
+      packages-to-scan: com.learn.aiintelligenttourism.controller
+# knife4j
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+logging:
+  level:
+    org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor: debug
