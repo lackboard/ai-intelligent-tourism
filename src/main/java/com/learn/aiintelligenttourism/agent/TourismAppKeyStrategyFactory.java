@@ -26,9 +26,6 @@ public class TourismAppKeyStrategyFactory{
             strategies.put("itinerary", new ReplaceStrategy()); // 结构化行程单
             strategies.put("finalResponse", new ReplaceStrategy()); // 给用户的自然语言回复
 
-            // 6. 流式输出结果
-            strategies.put("resultOutput", new AppendStrategy());
-
 
             strategies.put("messages", new AppendStrategy()); // 会话记录
             strategies.put("next_node", new ReplaceStrategy());

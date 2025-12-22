@@ -121,20 +121,10 @@ public class TourismGraphService {
 
         try {
             // 执行流
+            // 这里可以根据实际输出结构收集文本，这里简单假设最后会有文本输出
+            // 如果需要流式推送到前端，这里需要改为 SSE 逻辑，本例先做同步返回
             compiledGraph.stream(input, config)
-                    .doOnNext(event -> {
-                        if(event instanceof StreamingOutput<?> streamingOutput){
-                            // 流式输出块
-                            String chunk = streamingOutput.chunk();
-                            if (chunk != null && !chunk.isEmpty()) {
-                                System.out.print(chunk); // 实时打印流式内容
-                            }
-                        }
-
-                        lastOutputRef.set(event);
-                        // 这里可以根据实际输出结构收集文本，这里简单假设最后会有文本输出
-                        // 如果需要流式推送到前端，这里需要改为 SSE 逻辑，本例先做同步返回
-                    })
+                    .doOnNext(lastOutputRef::set)
                     .blockLast(); 
         } catch (Exception e) {
             log.error("Graph execution error", e);

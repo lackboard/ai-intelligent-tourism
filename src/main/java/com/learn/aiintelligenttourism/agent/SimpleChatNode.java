@@ -74,37 +74,26 @@ public class SimpleChatNode implements NodeActionWithConfig {
                 .map(v -> (String) v)
                 .orElseThrow(() -> new IllegalStateException("会话ID 异常"));
         Prompt prompt = new Prompt(messages, this.chatOptions);
-        //ChatResponse chatResponse = this.chatClient
-        //        .prompt(prompt)
-        //        //.advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
-        //        //.advisors(loveAppRagCloudAdvisor)
-        //        .user(message)
-        //        .advisors(tourismAppRagCustomAdvisor)
-        //        .toolCallbacks(allTools)
-        //        .call()
-        //        .chatResponse();
-
-        Flux<ChatResponse> resultOutput = this.chatClient
+        ChatResponse chatResponse = this.chatClient
                 .prompt(prompt)
-                .system(systemResource)
                 //.advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
                 //.advisors(loveAppRagCloudAdvisor)
+                .system(systemResource)
                 .user(message)
                 .advisors(tourismAppRagCustomAdvisor)
                 .toolCallbacks(allTools)
-                .stream()
-                .chatResponse(); // 获取流式字符串内容
+                .call()
+                .chatResponse();
 
-        return Map.of("resultOutput",resultOutput);
 
-        //assert chatResponse != null;
-        //String content = chatResponse.getResult().getOutput().getText();
-        //// 返回给前端：类型是 "text"
-        //assert content != null;
-        //return Map.of(
-        //        "finalResponse", content,
-        //        "next_node","end",
-        //        "messages",new AssistantMessage(content));
+        assert chatResponse != null;
+        String content = chatResponse.getResult().getOutput().getText();
+        // 返回给前端：类型是 "text"
+        assert content != null;
+        return Map.of(
+                "finalResponse", content,
+                "next_node","end",
+                "messages",new AssistantMessage(content));
 
     }
 }
