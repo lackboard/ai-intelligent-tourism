@@ -3,6 +3,9 @@ application-local.yml
 mcp-servers.json
 tmp
 node_modules
+ai-intelligent-tourism.zip
+_metadata.json
+src/test
 
 
 HELP.md
