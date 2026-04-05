@@ -20,9 +20,11 @@ public class ToolRegistration {
     @Value("${juhe.exchange_rate.key}")
     private String exchangeRateKey;
 
-    @Resource
-    private VectorStore vectorStore;
+    @Value("${amap.geocode.key}")
+    private String amapGeocodeKey;
 
+    @Resource(name = "knowledgeVectorStore")
+    private VectorStore vectorStore;
     @Bean
     public ToolCallback[] allTools(){
         //FileOperationTool fileOperationTool = new FileOperationTool();
@@ -34,6 +36,8 @@ public class ToolRegistration {
         //TerminateTool terminateTool = new TerminateTool();
         JuheWeatherTool juheWeatherTool = new JuheWeatherTool(weatherKey);
         JuheExchangeRateTool juheExchangeRateTool = new JuheExchangeRateTool(exchangeRateKey);
+        AmapTool amapTool = new AmapTool(amapGeocodeKey);
+        PolicyAnnouncementTool policyAnnouncementTool = new PolicyAnnouncementTool();
         TourismKnowledgeTool tourismKnowledgeTool = new TourismKnowledgeTool(vectorStore);
         return ToolCallbacks.from(
                 //fileOperationTool,
@@ -45,7 +49,33 @@ public class ToolRegistration {
                 //terminateTool,
                 tourismKnowledgeTool,
                 juheWeatherTool,
-                juheExchangeRateTool
+                juheExchangeRateTool,
+                amapTool,
+                policyAnnouncementTool
+        );
+    }
+
+    @Bean("policyTools")
+    public ToolCallback[] policyTools() {
+        AmapTool amapTool = new AmapTool(amapGeocodeKey);
+        PolicyAnnouncementTool policyAnnouncementTool = new PolicyAnnouncementTool();
+        return ToolCallbacks.from(
+                policyAnnouncementTool,
+                amapTool
+        );
+    }
+
+    @Bean("simpleChatTools")
+    public ToolCallback[] simpleChatTools() {
+        AmapTool amapTool = new AmapTool(amapGeocodeKey);
+        PolicyAnnouncementTool policyAnnouncementTool = new PolicyAnnouncementTool();
+        JuheWeatherTool juheWeatherTool = new JuheWeatherTool(weatherKey);
+        JuheExchangeRateTool juheExchangeRateTool = new JuheExchangeRateTool(exchangeRateKey);
+        return ToolCallbacks.from(
+                juheWeatherTool,
+                juheExchangeRateTool,
+                amapTool,
+                policyAnnouncementTool
         );
     }
 

@@ -1,19 +1,29 @@
 import axios from 'axios';
 import { ChatPayload } from '@/types/chat';
 
-const SSE_URL = 'http://localhost:8123/api/ai/tourism_app/chat/sse_emitter';
-const AGENT_URL = 'http://localhost:8123/api/ai/tourism_app/chat/manus';
+// 根据环境变量设置 API 基础 URL
+// - 生产环境：使用相对路径，适用于前后端同域部署（如 Nginx 反代到后端）
+// - 开发环境：指向本地后端服务
+// 也可通过 VITE_API_BASE_URL 覆盖（例如测试环境）
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.PROD ? '/api' : 'http://localhost:8120/api')
+).replace(/\/$/, '');
+
+const SSE_URL = `${API_BASE_URL}/ai/tourism_app/chat/sse_emitter`;
+const AGENT_URL = `${API_BASE_URL}/ai/tourism_app/chat/manus`;
 
 export interface StartSseOptions {
   message: string;
+  visitorId: string;
   threadId: string;
   onPayload: (payload: ChatPayload) => void;
   onError?: (message: string) => void;
   onComplete?: () => void;
 }
 
-export const startSseChat = ({ message, threadId, onPayload, onError, onComplete }: StartSseOptions) => {
-  const url = `${SSE_URL}?message=${encodeURIComponent(message)}&chatId=${encodeURIComponent(threadId)}`;
+export const startSseChat = ({ message, visitorId, threadId, onPayload, onError, onComplete }: StartSseOptions) => {
+  const url = `${SSE_URL}?message=${encodeURIComponent(message)}&visitorId=${encodeURIComponent(visitorId)}&threadId=${encodeURIComponent(threadId)}`;
   const eventSource = new EventSource(url);
   let hasReceivedData = false;
 
@@ -38,7 +48,7 @@ export const startSseChat = ({ message, threadId, onPayload, onError, onComplete
     }
   };
 
-  eventSource.onerror = (e) => {
+  eventSource.onerror = () => {
     eventSource.close();
     
     // EventSource.CLOSED = 2, 表示连接已关闭
@@ -68,9 +78,10 @@ export const startSseChat = ({ message, threadId, onPayload, onError, onComplete
   };
 };
 
-export const postAgentChat = async (message: string, threadId: string) => {
+export const postAgentChat = async (message: string, visitorId: string, threadId: string) => {
   const { data } = await axios.post<ChatPayload>(AGENT_URL, {
     message,
+    visitorId,
     threadId,
   });
   return data;

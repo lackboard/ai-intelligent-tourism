@@ -1,14 +1,14 @@
 package com.learn.aiintelligenttourism.app;
 
-
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
+import com.learn.aiintelligenttourism.agent.IntentRecognitionResult;
+import com.learn.aiintelligenttourism.agent.IntentRecognitionService;
 import com.learn.aiintelligenttourism.Model.ItineraryResponse;
-import com.learn.aiintelligenttourism.RAG.TourismAppDocumentReader;
-import com.learn.aiintelligenttourism.RAG.TourismAppRagCustomAdvisorFactory;
 import com.learn.aiintelligenttourism.advisor.MyLoggerAdvisor;
-import jakarta.annotation.PostConstruct;
+import com.learn.aiintelligenttourism.memory.ConversationIdentity;
+import com.learn.aiintelligenttourism.memory.MemoryConstants;
+import com.learn.aiintelligenttourism.memory.MemoryOrchestrator;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.ChatClient.ChatClientRequestSpec;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -17,10 +17,8 @@ import org.springframework.ai.chat.memory.repository.jdbc.JdbcChatMemoryReposito
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
@@ -32,231 +30,194 @@ import java.util.Map;
 public class TourismApp {
 
     private final ChatClient chatClient;
+    private final String today = LocalDate.now().toString();
+    private final MemoryOrchestrator memoryOrchestrator;
+    // 与 Graph 共用同一意图识别内核，避免双链路行为不一致。
+    private final IntentRecognitionService intentRecognitionService;
 
     @Autowired
-    JdbcChatMemoryRepository chatMemoryRepository; // 配置存储
+    private ToolCallback[] allTools;
 
-    // 控制记忆长度
-    ChatMemory messageWindowChatMemory = MessageWindowChatMemory.builder()
-            .chatMemoryRepository(chatMemoryRepository)
-            .maxMessages(15)
-            .build();
     @Autowired
-    private DashScopeChatModel dashscopeChatModel;
-    // 获取当前日期
-    String today = LocalDate.now().toString();
+    private Advisor tourismAppRagCustomAdvisor;
 
-    /**
-     * 初始化 AI 客户端
-     *  Resource systemResource 要放在里边，否则执行顺序有问题，会导致systemResource 为 null
-     * @param dashscopeChatModel
-     */
-    public TourismApp(@Value("classpath:/prompts/system-message.st") Resource systemResource, ChatModel dashscopeChatModel) {
-        //String fileDir = System.getProperty("user.dir") + "/tmp/chat-memory";
+    public TourismApp(
+            @Value("classpath:/prompts/system-message.st") Resource systemResource,
+            ChatModel dashscopeChatModel,
+            JdbcChatMemoryRepository chatMemoryRepository,
+            MemoryOrchestrator memoryOrchestrator,
+            IntentRecognitionService intentRecognitionService
+    ) {
+        this.memoryOrchestrator = memoryOrchestrator;
+        this.intentRecognitionService = intentRecognitionService;
+        // 这条链路显式依赖 JDBC chat memory，因此在构造阶段完成初始化，避免字段注入时序问题。
+        ChatMemory messageWindowChatMemory = MessageWindowChatMemory.builder()
+                .chatMemoryRepository(chatMemoryRepository)
+                .maxMessages(MemoryConstants.WORKING_MEMORY_WINDOW_SIZE)
+                .build();
 
         this.chatClient = ChatClient.builder(dashscopeChatModel)
-                .defaultSystem(systemResource) // 动态注入日期)
+                .defaultSystem(systemResource)
                 .defaultAdvisors(
                         MessageChatMemoryAdvisor.builder(messageWindowChatMemory).build(),
-                        // 自定义拦截器
                         new MyLoggerAdvisor()
                 )
                 .build();
     }
 
+    public String doChat(String message, String threadId) {
+        return doChat(message, threadId, threadId);
+    }
 
-    /**
-     * AI 基础对话（支持多轮对话记忆）
-     * @param message
-     * @param chatId
-     * @return
-     */
-    public String doChat(String message,String chatId){
-        ChatResponse chatResponse = this.chatClient
+    public String doChat(String message, String visitorId, String threadId) {
+        ConversationIdentity identity = new ConversationIdentity(resolveVisitorId(visitorId, threadId), threadId);
+        String memoryPrompt = memoryOrchestrator.buildPrompt(identity, message);
+
+        ChatResponse chatResponse = applyMemoryContext(this.chatClient
                 .prompt()
-                //.system(s -> s.param("current_date", today)) // 动态注入日期
                 .user(message)
-                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
+                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, threadId)), memoryPrompt)
                 .call()
                 .chatResponse();
+
         String content = chatResponse.getResult().getOutput().getText();
+        memoryOrchestrator.rememberTextTurn(identity, message, content);
         return content;
     }
 
-    @Autowired
-    VectorStore vectorStore;
+    public String doChatWithRag(String message, String threadId) {
+        return doChatWithRag(message, threadId, threadId);
+    }
 
-    @jakarta.annotation.Resource
-    private TourismAppDocumentReader tourismAppDocumentReader;
+    public String doChatWithRag(String message, String visitorId, String threadId) {
+        ConversationIdentity identity = new ConversationIdentity(resolveVisitorId(visitorId, threadId), threadId);
+        String memoryPrompt = memoryOrchestrator.buildPrompt(identity, message);
 
-    @jakarta.annotation.Resource
-    private ToolCallback[] allTools;
-
-    @Autowired
-    private Advisor tourismAppRagCustomAdvisor ;
-
-
-
-    /**
-     * AI 基础对话，并且实现了RAG检索和工具调用
-     * @param message
-     * @param chatId
-     * @return
-     */
-    public String doChatWithRag(String message,String chatId){
-        // 加载文档
-        //List<Document> documents = tourismAppDocumentReader.loadMarkdowns();
-        //vectorStore.add(documents);
-        // 获取当前日期
-
-        ChatResponse chatResponse = chatClient
+        ChatResponse chatResponse = applyMemoryContext(chatClient
                 .prompt()
                 .user(message)
-                .system(s -> s.param("current_date", today)) // 动态注入日期
-                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
-                //.advisors(loveAppRagCloudAdvisor)
+                .system(spec -> spec.param("current_date", today))
+                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, threadId))
                 .advisors(tourismAppRagCustomAdvisor)
-                .toolCallbacks(allTools)
+                .toolCallbacks(allTools), memoryPrompt)
                 .call()
                 .chatResponse();
+
         String content = chatResponse.getResult().getOutput().getText();
+        memoryOrchestrator.rememberTextTurn(identity, message, content);
         return content;
     }
 
+    public Map<String, Object> doChatWithIntentionJudgment(String message, String threadId) {
+        return doChatWithIntentionJudgment(message, threadId, threadId);
+    }
 
-    /**
-     * AI 基础对话，并且实现了RAG检索和工具调用 ，还有意图判断（什么时候回复结构化数据）
-     * @param message
-     * @param chatId
-     * @return
-     */
-    public Map<String, Object> doChatWithIntentionJudgment(String message,String chatId){
+    public Map<String, Object> doChatWithIntentionJudgment(String message, String visitorId, String threadId) {
+        ConversationIdentity identity = new ConversationIdentity(resolveVisitorId(visitorId, threadId), threadId);
+        String memoryPrompt = memoryOrchestrator.buildPrompt(identity, message);
+        // 非 Graph 同样走“前置召回增强分类”。
+        IntentRecognitionResult intentResult = intentRecognitionService.recognize(message);
+        boolean isPlanning = intentResult.isPlan();
 
-        // AI 意图判断结果
-        boolean isPlanning = checkIntent(message);
-
-        if(isPlanning){
-            ItineraryResponse itinerary = chatClient
+        if (isPlanning) {
+            ItineraryResponse itinerary = applyMemoryContext(chatClient
                     .prompt()
                     .user(message)
-                    .system(s -> s.param("current_date", today)) // 动态注入日期
-                    .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
-                    //.advisors(loveAppRagCloudAdvisor)
+                    .system(spec -> spec.param("current_date", today))
+                    .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, threadId))
                     .advisors(tourismAppRagCustomAdvisor)
-                    .toolCallbacks(allTools)
+                    .toolCallbacks(allTools), memoryPrompt)
                     .call()
                     .entity(ItineraryResponse.class);
-            assert itinerary != null;
+            memoryOrchestrator.rememberItinerary(identity, message, itinerary);
             return Map.of("type", "card", "data", itinerary);
-        }else{
-            ChatResponse chatResponse = chatClient
-                    .prompt()
-                    .user(message)
-                    .system(s -> s.param("current_date", today)) // 动态注入日期
-                    .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
-                    //.advisors(loveAppRagCloudAdvisor)
-                    .advisors(tourismAppRagCustomAdvisor)
-                    .toolCallbacks(allTools)
-                    .call()
-                    .chatResponse();
-            assert chatResponse != null;
-            String content = chatResponse.getResult().getOutput().getText();
-            // 返回给前端：类型是 "text"
-            assert content != null;
-            return Map.of("type", "text", "data", content);
         }
+
+        ChatResponse chatResponse = applyMemoryContext(chatClient
+                .prompt()
+                .user(message)
+                .system(spec -> spec.param("current_date", today))
+                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, threadId))
+                .advisors(tourismAppRagCustomAdvisor)
+                .toolCallbacks(allTools), memoryPrompt)
+                .call()
+                .chatResponse();
+
+        String content = chatResponse.getResult().getOutput().getText();
+        memoryOrchestrator.rememberTextTurn(identity, message, content);
+        return Map.of("type", "text", "data", content);
     }
 
     /**
-     * AI 基础对话（流式），包含意图判断、RAG检索和工具调用
-     * 返回的数据结构约定：
-     *  - 文本流：{"type": "text", "data": "部分字符"}
-     *  - 卡片流：{"type": "card", "data": {完整对象}}
+     * 这条流式链路继续使用 JDBC chat memory，不和 Graph checkpoint 混用。
      */
-    public Flux<Map<String, Object>> doChatWithIntentionJudgmentByStream(String message, String chatId) {
-        // 使用 Flux.defer 确保 checkIntent 在订阅时才执行，不会阻塞主线程
+    public Flux<Map<String, Object>> doChatWithIntentionJudgmentByStream(String message, String threadId) {
+        return doChatWithIntentionJudgmentByStream(message, threadId, threadId);
+    }
+
+    /**
+     * visitorId 用于聚合同一访客的长期记忆；threadId 继续只代表当前会话线程。
+     */
+    public Flux<Map<String, Object>> doChatWithIntentionJudgmentByStream(String message, String visitorId, String threadId) {
+        ConversationIdentity identity = new ConversationIdentity(resolveVisitorId(visitorId, threadId), threadId);
+        String memoryPrompt = memoryOrchestrator.buildPrompt(identity, message);
+
         return Flux.defer(() -> {
-            // 1. AI 意图判断 (假设 checkIntent 是个耗时操作)
-            boolean isPlanning = checkIntent(message);
+            // SSE 链路使用同一套判定逻辑，减少线上路由偏差。
+            IntentRecognitionResult intentResult = intentRecognitionService.recognize(message);
+            boolean isPlanning = intentResult.isPlan();
 
             if (isPlanning) {
-                // === 分支 A：意图为生成行程单 (返回 Card) ===
-                // 对于结构化数据，通常建议生成完整对象后一次性返回，或者返回 JSON 字符串
-                // 这里我们使用阻塞的 call() 获取完整结果，然后包装成 Flux 发送一次
-
                 try {
-                    ItineraryResponse itinerary = chatClient
+                    ItineraryResponse itinerary = applyMemoryContext(chatClient
                             .prompt()
                             .user(message)
-                            .system(s -> s.param("current_date", today))
-                            .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
-                            //.advisors(loveAppRagCloudAdvisor)
+                            .system(spec -> spec.param("current_date", today))
+                            .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, threadId))
                             .advisors(tourismAppRagCustomAdvisor)
-                            .toolCallbacks(allTools)
+                            .toolCallbacks(allTools), memoryPrompt)
                             .call()
                             .entity(ItineraryResponse.class);
 
                     if (itinerary != null) {
-                        // 发送单个事件
+                        memoryOrchestrator.rememberItinerary(identity, message, itinerary);
                         return Flux.just(Map.of("type", "card", "data", itinerary));
-                    } else {
-                        return Flux.error(new RuntimeException("数据生成异常"));
                     }
+                    return Flux.error(new RuntimeException("数据生成异常"));
                 } catch (Exception e) {
                     return Flux.error(e);
                 }
-
-            } else {
-                // === 分支 B：普通对话 (返回 Text 流) ===
-                // 使用 stream() 接口，将每个 token 包装成 Map 返回
-
-                return chatClient
-                        .prompt()
-                        .user(message)
-                        .system(s -> s.param("current_date", today))
-                        .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
-                        //.advisors(loveAppRagCloudAdvisor)
-                        .advisors(tourismAppRagCustomAdvisor)
-                        .toolCallbacks(allTools)
-                        .stream()
-                        .content() // 获取流式字符串内容
-                        .map(content -> {
-                            // 将每个字符串片段包装成前端需要的格式
-                            return Map.of("type", "text", "data", content);
-                        });
             }
+
+            StringBuilder assistantReply = new StringBuilder();
+            return applyMemoryContext(chatClient
+                    .prompt()
+                    .user(message)
+                    .system(spec -> spec.param("current_date", today))
+                    .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, threadId))
+                    .advisors(tourismAppRagCustomAdvisor)
+                    .toolCallbacks(allTools), memoryPrompt)
+                    .stream()
+                    .content()
+                    .doOnNext(assistantReply::append)
+                    .doOnComplete(() -> memoryOrchestrator.rememberTextTurn(identity, message, assistantReply.toString()))
+                    .map(content -> Map.of("type", "text", "data", content));
         });
     }
 
-    /**
-     * 意图判断逻辑 (用 便宜AI 实现)
-     * @param systemResource
-     * @param message
-     * @return
-     */
-    private boolean checkIntent(Resource systemResource,String message) {
 
-        try {
-            DashScopeChatOptions dashScopeChatOptions = DashScopeChatOptions.builder().withModel("qwen-flash").build();
-            String content = this.chatClient.prompt()
-                    .options(dashScopeChatOptions)
-                    .system(systemResource)
-                    .user(message)
-                    .call()
-                    .content();// 获取 AI 的回复
-            // 清洗结果（防止 AI 偶尔输出 "TRUE." 或 "Result: TRUE"）
-            assert content != null;
-            String cleanResult = content.trim().toUpperCase().replaceAll("[^A-Z]", "");
-            return "TRUE".equals(cleanResult);
-        } catch (Exception e) {
-            // 兜底逻辑：如果 AI 调用失败，回退到简单的关键词判断，保证系统不挂
-            System.err.println("意图识别服务异常: " + e.getMessage());
-            return message.contains("规划") || message.contains("行程") || message.contains("安排");
+    private ChatClientRequestSpec applyMemoryContext(ChatClientRequestSpec spec, String memoryPrompt) {
+        if (memoryPrompt == null || memoryPrompt.isBlank()) {
+            return spec;
         }
+        return spec.system(memoryPrompt);
     }
 
-    // 重载方法
-    private boolean checkIntent(String message) {
-        return checkIntent(new ClassPathResource("/prompts/system-message-intention-judgment.st"), message);
+    private String resolveVisitorId(String visitorId, String threadId) {
+        if (visitorId == null || visitorId.isBlank()) {
+            // 兼容旧调用方：没有 visitorId 时退化为 threadId 作用域，但无法沉淀跨会话记忆。
+            return threadId;
+        }
+        return visitorId.trim();
     }
 }

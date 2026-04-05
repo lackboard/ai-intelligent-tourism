@@ -4,6 +4,8 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.action.NodeActionWithConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
+import com.learn.aiintelligenttourism.Model.TravelRequirements;
+import com.learn.aiintelligenttourism.memory.MemoryPromptSupport;
 import jakarta.annotation.Resource;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -23,15 +25,21 @@ public class ResearchNode implements NodeActionWithConfig {
     public Map<String, Object> apply(OverAllState state, RunnableConfig config) throws Exception {
         System.out.println(">>> 进入 Research Agent 节点 (手动隔离模式)");
 
+        TravelRequirements requirements = state.value("travelRequirements")
+                .map(TravelRequirements.class::cast)
+                .orElseThrow(() -> new IllegalStateException("research 节点缺少 travelRequirements"));
+        String memoryContextPrompt = MemoryPromptSupport.fromState(state);
+
         // 关键点：创建一个全新的 Config，不包含 resume 信号
         // 这样 Agent 就会把它当做一个全新的请求来处理，不会去查不存在的 Checkpoint
         RunnableConfig cleanConfig = RunnableConfig.builder()
                 .build();
 
-        // 执行 Agent
-        // 注意：ReactAgent 的 invoke 入参和出参通常是 Map<String, Object>
-
-        Optional<OverAllState> agentOutput = this.researchAgent.invoke((List<Message>) state.data().get("messages"), cleanConfig);
+        // 不直接把主图 messages 列表交给 ReactAgent。
+        // Graph state 中的消息结构和 Agent 内部模板渲染期望并不完全一致，
+        // 直接透传容易在 agent framework 内部触发类型转换错误。
+        String researchPrompt = buildResearchPrompt(requirements, memoryContextPrompt);
+        Optional<OverAllState> agentOutput = this.researchAgent.invoke(researchPrompt, cleanConfig);
 
         // 处理输出：提取 Agent 的结果并放入主图需要的 key (searchResults)
         // ReactAgent 通常将最终结果放在 "output" 或 "payload" 中，也可能包含 "messages"
@@ -72,5 +80,25 @@ public class ResearchNode implements NodeActionWithConfig {
         // 7. 返回给主 Graph 的结果
         assert finalResult != null;
         return Map.of("searchResults", finalResult);
+    }
+
+    private String buildResearchPrompt(TravelRequirements requirements, String memoryContextPrompt) {
+        StringBuilder prompt = new StringBuilder("请围绕以下旅游需求采集客观资料：");
+        prompt.append("\n目的地：").append(requirements.destination());
+        prompt.append("\n出行时间：").append(requirements.travelDate());
+
+        if (requirements.budget() != null && !requirements.budget().isBlank()) {
+            prompt.append("\n预算：").append(requirements.budget());
+        }
+        if (requirements.preference() != null && !requirements.preference().isBlank()) {
+            prompt.append("\n偏好/同行信息：").append(requirements.preference());
+        }
+
+        if (memoryContextPrompt != null && !memoryContextPrompt.isBlank()) {
+            prompt.append("\n\n以下是当前访客的三层记忆，只在相关时参考：\n").append(memoryContextPrompt);
+        }
+
+        prompt.append("\n请重点调用工具查询天气、基础游玩资讯、近期注意事项，并按系统提示格式原样整理输出。");
+        return prompt.toString();
     }
 }

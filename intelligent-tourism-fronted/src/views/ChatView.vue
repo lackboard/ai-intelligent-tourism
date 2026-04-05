@@ -98,6 +98,7 @@ const startSseFlow = (content: string) => {
   stopSse?.();
   stopSse = startSseChat({
     message: content,
+    visitorId: chatStore.visitorId,
     threadId: chatStore.threadId,
     onPayload: (payload) => handleAiPayload(aiMessageId, payload),
     onError: (err) => {
@@ -131,7 +132,7 @@ const startAgentFlow = async (content: string) => {
   });
 
   try {
-    const payload = await postAgentChat(content, chatStore.threadId);
+    const payload = await postAgentChat(content, chatStore.visitorId, chatStore.threadId);
     chatStore.updateMessage(aiMessageId, (msg: ChatMessage) => {
       msg.payload = payload;
       msg.streaming = false;
@@ -213,6 +214,7 @@ onBeforeUnmount(() => {
           <span class="px-3 py-1 rounded-full text-sm font-medium transition-all duration-300 backdrop-blur-md" :class="modeBadge.classes">
             {{ modeBadge.label }}
           </span>
+          <span class="hidden md:inline text-sm text-white/80 drop-shadow">Visitor: {{ chatStore.visitorId.slice(0, 6) }}...</span>
           <span class="hidden sm:inline text-sm text-white/80 drop-shadow">Thread: {{ chatStore.threadId.slice(0, 6) }}...</span>
         </div>
         <button

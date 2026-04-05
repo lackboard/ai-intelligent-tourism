@@ -1,35 +1,41 @@
 package com.learn.aiintelligenttourism.app;
 
 import cn.hutool.core.bean.BeanUtil;
-import cn.hutool.core.convert.Convert;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.graph.*;
-import com.alibaba.cloud.ai.graph.action.*;
-import com.alibaba.cloud.ai.graph.agent.ReactAgent;
+import com.alibaba.cloud.ai.graph.CompileConfig;
+import com.alibaba.cloud.ai.graph.CompiledGraph;
+import com.alibaba.cloud.ai.graph.KeyStrategyFactory;
+import com.alibaba.cloud.ai.graph.NodeOutput;
+import com.alibaba.cloud.ai.graph.RunnableConfig;
+import com.alibaba.cloud.ai.graph.StateGraph;
+import com.alibaba.cloud.ai.graph.action.AsyncNodeActionWithConfig;
+import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
+import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.checkpoint.config.SaverConfig;
-import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.alibaba.cloud.ai.graph.state.StateSnapshot;
-import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import com.learn.aiintelligenttourism.Model.ChatRequest;
 import com.learn.aiintelligenttourism.Model.ItineraryResponse;
 import com.learn.aiintelligenttourism.agent.*;
-import com.learn.aiintelligenttourism.config.ChatClientConfig;
+import com.learn.aiintelligenttourism.memory.ConversationIdentity;
+import com.learn.aiintelligenttourism.memory.MemoryConstants;
+import com.learn.aiintelligenttourism.memory.MemoryOrchestrator;
+import com.learn.aiintelligenttourism.memory.MemoryPromptSupport;
+import com.learn.aiintelligenttourism.memory.WorkingMemoryMessageView;
+import com.learn.aiintelligenttourism.memory.WorkingMemorySnapshot;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
-
+import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
-
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.alibaba.cloud.ai.graph.StateGraph.END;
@@ -40,16 +46,43 @@ import static com.alibaba.cloud.ai.graph.action.AsyncEdgeAction.edge_async;
 @Service
 public class TourismGraphService {
 
-    @Autowired
-    private ChatClient defaultChatClient;
-    private CompiledGraph compiledGraph; // 单例 Graph
+    public static final String SOURCE_GRAPH_CHECKPOINT = "graph_checkpoint";
 
-    private final ConcurrentMap<String, ChatClient> userChatClientCache = new ConcurrentHashMap<>();
+    private final ChatClient defaultChatClient;
+    private final ResearchNode researchNode;
+    private final SimpleChatNode simpleChatNode;
+    private final PolicyNode policyNode;
+    private final PlanValidationNode planValidationNode;
+    private final BaseCheckpointSaver graphCheckpointSaver;
+    private final MemoryOrchestrator memoryOrchestrator;
+    // Graph 主链路的统一意图识别服务（前置 RAG + LLM + fallback）。
+    private final IntentRecognitionService intentRecognitionService;
+
+    private CompiledGraph compiledGraph;
+
+    @Autowired
+    public TourismGraphService(
+            ChatClient defaultChatClient,
+            ResearchNode researchNode,
+            SimpleChatNode simpleChatNode,
+            PolicyNode policyNode,
+            PlanValidationNode planValidationNode,
+            BaseCheckpointSaver graphCheckpointSaver,
+            MemoryOrchestrator memoryOrchestrator,
+            IntentRecognitionService intentRecognitionService
+    ) {
+        this.defaultChatClient = defaultChatClient;
+        this.researchNode = researchNode;
+        this.simpleChatNode = simpleChatNode;
+        this.policyNode = policyNode;
+        this.planValidationNode = planValidationNode;
+        this.graphCheckpointSaver = graphCheckpointSaver;
+        this.memoryOrchestrator = memoryOrchestrator;
+        this.intentRecognitionService = intentRecognitionService;
+    }
 
     @PostConstruct
     public void init() {
-
-        // 2. 编译 Graph (只编译一次)
         try {
             this.compiledGraph = createGraphWithInterruptableAction();
         } catch (Exception e) {
@@ -58,186 +91,350 @@ public class TourismGraphService {
     }
 
     /**
-     * 处理聊天请求（核心业务逻辑）
+     * Graph 模式统一使用 threadId 作为会话主键。
+     * - 已中断会话：恢复到上一个等待用户补充信息的节点
+     * - 已结束会话：带着旧状态开启新一轮，从而保留历史上下文
      */
     public Map<String, Object> handleChat(ChatRequest request) throws Exception {
-        String threadId = request.getThreadId();
-        String userInput = request.getMessage();
-        // 配置线程ID
+        String threadId = resolveThreadId(request);
+        String visitorId = resolveVisitorId(request, threadId);
+        String userInput = resolveUserInput(request);
+        ConversationIdentity identity = new ConversationIdentity(visitorId, threadId);
+
         RunnableConfig config = RunnableConfig.builder()
                 .threadId(threadId)
                 .build();
 
-        // 1. 尝试获取当前状态
-        StateSnapshot currentState = null;
-        try {
-            // 如果是第一次运行，这里会抛出 "Missing Checkpoint" 异常
-            currentState = compiledGraph.getState(config);
-        } catch (Exception e) {
-            // 捕获异常，说明没有历史状态，视为新对话
-            log.info("Thread [{}] - No existing state found (New Conversation)", threadId);
-        }
-        boolean isResuming = currentState != null && !currentState.next().isEmpty() && !currentState.next().equals(END);
+        StateSnapshot currentState = getCurrentState(config, threadId);
+        String graphWorkingMemorySummary = summarizeGraphMessages(currentState, MemoryConstants.WORKING_MEMORY_WINDOW_SIZE);
+        String memoryContextPrompt = memoryOrchestrator.buildPrompt(identity, userInput, graphWorkingMemorySummary);
+        boolean isResuming = isInterruptedState(currentState);
+        Map<String, Object> newTurnInput = buildNewTurnInput(visitorId, threadId, userInput, memoryContextPrompt);
 
-        
         if (isResuming) {
             log.info("Thread [{}] - Resuming from interruption with input: {}", threadId, userInput);
-            // 获取当前挂起的节点（通常是 InterruptableAction 的节点）
-            //String pendingNode = currentState.next().iterator().next();
-            
-            // 更新状态（模拟用户填充了缺失信息）
-            Map<String, Object> stateUpdate = Map.of(
-                    "userMessage", userInput
-            );
-            
-            // updateState 会返回一个新的 config
-            config = compiledGraph.updateState(config, stateUpdate, currentState.next());
-            
-            // 添加恢复标记 (HUMAN_FEEDBACK_METADATA_KEY)
-            config = RunnableConfig.builder(config)
-                    .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, "true")
-                    .build();
-            
-            // 恢复执行时，input 为 null (因为状态已通过 updateState 更新)
-            return executeGraph(null, config, threadId);
 
-        } else {
-            log.info("Thread [{}] - Starting new conversation: {}", threadId, userInput);
-            // 新对话初始输入
-            Map<String, Object> initialInput = Map.of(
-                    "messages", new UserMessage(userInput),
-                    "chatId", request.getChatId() != null ? request.getChatId() : "default",
-                    "userMessage", userInput
-            );
-            return executeGraph(initialInput, config, threadId);
+            try {
+                Map<String, Object> stateUpdate = new LinkedHashMap<>();
+                // 每轮开始前重置“最终输出槽位”，避免历史 finalResponse/itinerary 污染本轮返回类型。
+                stateUpdate.put("finalResponse", "");
+                stateUpdate.put("itinerary", null);
+                stateUpdate.put("userMessage", userInput);
+                stateUpdate.put("visitorId", visitorId);
+                stateUpdate.put(MemoryPromptSupport.MEMORY_CONTEXT_PROMPT_KEY, memoryContextPrompt);
+                // Graph 的 L1 统一在服务入口追加“当前用户这次真实输入”，避免各节点重复决定是否写用户消息。
+                stateUpdate.put("messages", List.of(new UserMessage(userInput)));
+                stateUpdate.put(MemoryPromptSupport.CURRENT_TURN_USER_MESSAGE_PERSISTED_KEY, true);
+                config = compiledGraph.updateState(config, stateUpdate, currentState.next());
+                config = RunnableConfig.builder(config)
+                        .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, "true")
+                        .build();
+                Map<String, Object> result = executeGraph(null, config);
+                rememberGraphOutcome(identity, userInput, result);
+                return result;
+            } catch (IllegalStateException e) {
+                if (!isMissingCheckpoint(e)) {
+                    throw e;
+                }
+                log.warn("Thread [{}] - Resume failed because checkpoint is missing. Falling back to a fresh turn.", threadId, e);
+            }
         }
+
+        log.info("Thread [{}] - Starting a new graph turn: {}", threadId, userInput);
+        // 新会话必须从 START 正常启动。
+        // 之前改成 updateState(..., null) + stream(null, config) 后，图可能没有 next 节点可执行，导致接口卡住。
+        Map<String, Object> result = executeGraph(newTurnInput, config);
+        rememberGraphOutcome(identity, userInput, result);
+        return result;
     }
 
     /**
-     * 执行 Graph 并封装结果
+     * Graph/manus 链路不会写 JDBC ChatMemory，L1 实际保存在 Graph checkpoint 的 state 里。
+     * 调试接口需要读这里，才能看到 manus 模式下的工作记忆。
      */
-    private Map<String, Object> executeGraph(Map<String, Object> input, RunnableConfig config, String threadId) {
+    public WorkingMemorySnapshot getGraphWorkingMemorySnapshot(String threadId, int maxMessages) {
+        if (threadId == null || threadId.isBlank()) {
+            return WorkingMemorySnapshot.empty(SOURCE_GRAPH_CHECKPOINT);
+        }
+
+        RunnableConfig config = RunnableConfig.builder()
+                .threadId(threadId.trim())
+                .build();
+        StateSnapshot snapshot = getCurrentState(config, threadId.trim());
+        if (snapshot == null || snapshot.state() == null || snapshot.state().data() == null) {
+            return WorkingMemorySnapshot.empty(SOURCE_GRAPH_CHECKPOINT);
+        }
+
+        List<WorkingMemoryMessageView> views = toWorkingMemoryViews(snapshot.state().data().get("messages"), maxMessages);
+        if (views.isEmpty()) {
+            return WorkingMemorySnapshot.empty(SOURCE_GRAPH_CHECKPOINT);
+        }
+
+        String summary = summarizeViews(views);
+        return new WorkingMemorySnapshot(SOURCE_GRAPH_CHECKPOINT, summary, views);
+    }
+
+    private Map<String, Object> executeGraph(Map<String, Object> input, RunnableConfig config) {
         AtomicReference<NodeOutput> lastOutputRef = new AtomicReference<>();
 
         try {
-            // 执行流
-            // 这里可以根据实际输出结构收集文本，这里简单假设最后会有文本输出
-            // 如果需要流式推送到前端，这里需要改为 SSE 逻辑，本例先做同步返回
             compiledGraph.stream(input, config)
                     .doOnNext(lastOutputRef::set)
-                    .blockLast(); 
+                    .blockLast();
         } catch (Exception e) {
             log.error("Graph execution error", e);
-            return Map.of("type", "error", "data","服务器出现问题");
+            return Map.of("type", "error", "data", "服务器出现问题");
         }
 
         NodeOutput lastOutput = lastOutputRef.get();
-
-        // 1. 判断是否中断
-        if (lastOutput instanceof InterruptionMetadata interruption) {
-            Optional<Object> finalResponse = interruption.metadata("finalResponse");
-            return Map.of("type", "text", "data", finalResponse.isPresent() ? finalResponse.get().toString() : "");
+        if (lastOutput == null) {
+            return Map.of("type", "error", "data", "服务器出现问题");
         }
 
-        // 2. 正常结束
-        // 尝试从状态中获取最后信息
+        if (lastOutput instanceof InterruptionMetadata interruption) {
+            persistInterruptedState(config, interruption);
+            Optional<Object> finalResponse = interruption.metadata("finalResponse");
+            return Map.of("type", "text", "data", finalResponse.map(Object::toString).orElse(""));
+        }
 
         return getResultMap(lastOutput);
-
-
     }
 
-    // 辅助方法：从 Graph 状态中提取最后一条 AI 回复
-    private Map<String,Object> getResultMap(NodeOutput lastOutput) {
-        Map<String, Object> stateData = lastOutput.state().data(); // 注意：StateSnapshot.values() 返回的是 Map
-        String intent = (String)stateData.get("intent");
-        if("CHAT".equals(intent)){
-            // 2. 安全获取文本
-            if (stateData.containsKey("finalResponse")) {
-                String finalResponse = String.valueOf(stateData.get("finalResponse"));
-                return Map.of("type", "text", "data", finalResponse);
+    private Map<String, Object> getResultMap(NodeOutput lastOutput) {
+        Map<String, Object> stateData = lastOutput.state().data();
+
+        // 对于 CHAT/POLICY 等文本节点，优先返回本轮 finalResponse，避免历史 itinerary 污染本轮输出。
+        Object finalResponse = stateData.get("finalResponse");
+        if (finalResponse instanceof String text && !text.isBlank()) {
+            return Map.of("type", "text", "data", text);
+        }
+
+        if (stateData.containsKey("itinerary")) {
+            Object rawItinerary = stateData.get("itinerary");
+            if (rawItinerary instanceof ItineraryResponse itineraryResponse) {
+                return Map.of("type", "card", "data", itineraryResponse);
             }
-        }else{
-            // 3. 安全转换 ItineraryResponse
-            if (stateData.containsKey("itinerary")) {
-                Object rawItinerary = stateData.get("itinerary");
-                if (rawItinerary != null) {
-                    try {
-                        // 【核心修复】使用 Jackson 将 Map 转换为 Record 对象
-                        Object itineraryObj = BeanUtil.toBean(rawItinerary, ItineraryResponse.class);
-                        return Map.of("type", "card", "data", itineraryObj);
-                    } catch (IllegalArgumentException e) {
-                        log.error("Failed to convert itinerary data", e);
-                        // 如果转换失败，降级为返回原始 Map，或者 null
-                        return Map.of("type", "error", "data","服务器出现问题");
-                    }
-                }
+            try {
+                Object itineraryObj = BeanUtil.toBean(rawItinerary, ItineraryResponse.class);
+                return Map.of("type", "card", "data", itineraryObj);
+            } catch (IllegalArgumentException e) {
+                log.error("Failed to convert itinerary data", e);
             }
         }
-        return Map.of("type", "error", "data","服务器出现问题");
 
+
+        return Map.of("type", "error", "data", "服务器出现问题");
     }
 
-    @Autowired
-    private ResearchNode researchNode;
+    /**
+     * InterruptableAction 返回的 metadata 不会自动写回 checkpoint。
+     * 这里统一用 graph.updateState(...) 持久化追问阶段产生的结构化结果和消息历史。
+     */
+    private void persistInterruptedState(RunnableConfig config, InterruptionMetadata interruption) {
+        Map<String, Object> stateUpdate = new LinkedHashMap<>();
+        interruption.metadata("travelRequirements").ifPresent(value -> stateUpdate.put("travelRequirements", value));
+        interruption.metadata("messages").ifPresent(value -> stateUpdate.put("messages", value));
+        interruption.metadata("pendingQuestion").ifPresent(value -> stateUpdate.put("pendingQuestion", value));
+        interruption.metadata(MemoryPromptSupport.CURRENT_TURN_USER_MESSAGE_PERSISTED_KEY)
+                .ifPresent(value -> stateUpdate.put(MemoryPromptSupport.CURRENT_TURN_USER_MESSAGE_PERSISTED_KEY, value));
 
-    @Autowired
-    private SimpleChatNode simpleChatNode;
+        if (stateUpdate.isEmpty()) {
+            return;
+        }
+
+        try {
+            compiledGraph.updateState(config, stateUpdate, interruption.node());
+        } catch (Exception e) {
+            log.error("Failed to persist interrupted graph state", e);
+        }
+    }
+
+    private StateSnapshot getCurrentState(RunnableConfig config, String threadId) {
+        try {
+            return compiledGraph.getState(config);
+        } catch (Exception e) {
+            log.info("Thread [{}] - No existing state found", threadId);
+            return null;
+        }
+    }
+
+    private boolean isInterruptedState(StateSnapshot currentState) {
+        return currentState != null
+                && currentState.next() != null
+                && !currentState.next().isBlank()
+                && !END.equals(currentState.next());
+    }
 
     /**
-     * 这里复用你原有的 Graph 构建逻辑
-     * 注意：researchNodeAction 需要包含在方法内或者作为类成员
+     * Graph 新会话统一通过 input 启动。
+     * 不要在这里依赖 updateState 创建 checkpoint，否则在无 checkpoint 的 thread 上会直接抛 Missing Checkpoint。
      */
+    private Map<String, Object> buildNewTurnInput(String visitorId, String threadId, String userInput, String memoryContextPrompt) {
+        Map<String, Object> input = new HashMap<>();
+        // 每轮开始前重置输出相关字段，确保返回值只来自本轮节点执行结果。
+        input.put("finalResponse", "");
+        input.put("itinerary", null);
+        input.put("visitorId", visitorId);
+        input.put("threadId", threadId);
+        input.put("userMessage", userInput);
+        input.put("retryCount", 0);
+        input.put("validationFeedback", "");
+        input.put(MemoryPromptSupport.MEMORY_CONTEXT_PROMPT_KEY, memoryContextPrompt);
+        input.put(MemoryPromptSupport.CURRENT_TURN_USER_MESSAGE_PERSISTED_KEY, false);
+        input.put("messages", List.of(new UserMessage(userInput)));
+        return input;
+    }
+
+    private boolean isMissingCheckpoint(IllegalStateException e) {
+        return e.getMessage() != null && e.getMessage().contains("Missing Checkpoint");
+    }
+
+    private String resolveThreadId(ChatRequest request) {
+        if (request == null || request.getThreadId() == null || request.getThreadId().isBlank()) {
+            throw new IllegalArgumentException("threadId 不能为空");
+        }
+        return request.getThreadId().trim();
+    }
+
+    private String resolveUserInput(ChatRequest request) {
+        if (request == null || request.getMessage() == null || request.getMessage().isBlank()) {
+            throw new IllegalArgumentException("message 不能为空");
+        }
+        return request.getMessage().trim();
+    }
+
+    private String resolveVisitorId(ChatRequest request, String threadId) {
+        if (request == null || request.getVisitorId() == null || request.getVisitorId().isBlank()) {
+            // 兼容旧请求：没有 visitorId 时退化到 threadId 作用域。
+            return threadId;
+        }
+        return request.getVisitorId().trim();
+    }
+
+    private List<WorkingMemoryMessageView> toWorkingMemoryViews(Object rawMessages, int maxMessages) {
+        if (!(rawMessages instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+
+        List<WorkingMemoryMessageView> views = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof Message message) {
+                views.add(new WorkingMemoryMessageView(
+                        message.getMessageType().name(),
+                        trimForDebug(message.getText(), 300)
+                ));
+            }
+        }
+
+        if (views.isEmpty()) {
+            return List.of();
+        }
+
+        int fromIndex = Math.max(0, views.size() - maxMessages);
+        return views.subList(fromIndex, views.size());
+    }
+
+    private String summarizeGraphMessages(StateSnapshot snapshot, int maxMessages) {
+        if (snapshot == null || snapshot.state() == null || snapshot.state().data() == null) {
+            return "";
+        }
+        List<WorkingMemoryMessageView> views = toWorkingMemoryViews(snapshot.state().data().get("messages"), maxMessages);
+        if (views.isEmpty()) {
+            return "";
+        }
+        return summarizeViews(views);
+    }
+
+    private String summarizeViews(List<WorkingMemoryMessageView> views) {
+        StringBuilder summary = new StringBuilder();
+        for (WorkingMemoryMessageView view : views) {
+            if (view.text() == null || view.text().isBlank()) {
+                continue;
+            }
+            summary.append("- ")
+                    .append(view.type())
+                    .append(": ")
+                    .append(trimForDebug(view.text(), 120))
+                    .append('\n');
+        }
+        return summary.toString().trim();
+    }
+
+    private String trimForDebug(String text, int maxLength) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        if (text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, maxLength) + "...";
+    }
+
+    private void rememberGraphOutcome(ConversationIdentity identity, String userInput, Map<String, Object> result) {
+        if (result == null) {
+            return;
+        }
+        Object type = result.get("type");
+        Object data = result.get("data");
+        
+        // 1. 无论这轮大模型回复文本还是直接重新出卡片，先解析并存档用户的 feedback（如 isRejected, isAccepted）。
+        // 提取时，如果没返回文本就传个空字符串给 assistant 占位即可。
+        String assistantText = ("text".equals(type) && data instanceof String text) ? text : "";
+        memoryOrchestrator.rememberTextTurn(identity, userInput, assistantText);
+
+        // 2. 如果此轮确实产生了一版“全新的行程卡片”，独立向 L3 追加行程存底。
+        if ("card".equals(type) && data instanceof ItineraryResponse itinerary) {
+            memoryOrchestrator.rememberItinerary(identity, userInput, itinerary);
+        }
+    }
+
     private CompiledGraph createGraphWithInterruptableAction() throws GraphStateException {
-
-        // 意图路由节点
-        var intentRouterNodeAsync = AsyncNodeActionWithConfig.node_async(new IntentRouterNode(defaultChatClient));
-        // 仅聊天节点
+        // 首节点使用增强意图路由：先判定 PLAN/POLICY/CHAT，再走条件边分流。
+        var intentRouterNodeAsync = AsyncNodeActionWithConfig.node_async(new IntentRouterNode(intentRecognitionService));
         var simpleChatNodeAsync = AsyncNodeActionWithConfig.node_async(this.simpleChatNode);
-
-        // 循环检查旅游要素节点（实现 InterruptableAction）
-        var circularInformationExtractor = new CircularInformationExtractorNode(defaultChatClient,"circular_information_extractor");
-
-        // 规划生成智能体
+        var policyNodeAsync = AsyncNodeActionWithConfig.node_async(this.policyNode);
+        var circularInformationExtractor = new CircularInformationExtractorNode(defaultChatClient, "circular_information_extractor");
         var planGeneratorNodeAsync = AsyncNodeActionWithConfig.node_async(new PlanGeneratorNode(defaultChatClient));
+        var planValidationNodeAsync = AsyncNodeActionWithConfig.node_async(this.planValidationNode);
 
-        // 配置 KeyStrategyFactory
         KeyStrategyFactory keyStrategyFactory = TourismAppKeyStrategyFactory.createKeyStrategyFactory();
 
-        // 构建 Graph
         StateGraph workflow = new StateGraph(keyStrategyFactory)
                 .addNode("intent_router", intentRouterNodeAsync)
                 .addNode("simple_chat", simpleChatNodeAsync)
-                .addNode("circular_information_extractor", circularInformationExtractor)  // 使用可中断节点
-                .addNode("research_agent",AsyncNodeActionWithConfig.node_async(researchNode))
+                .addNode("policy_node", policyNodeAsync)
+                .addNode("circular_information_extractor", circularInformationExtractor)
+                .addNode("research_agent", AsyncNodeActionWithConfig.node_async(researchNode))
                 .addNode("plan_generator", planGeneratorNodeAsync)
+                .addNode("plan_validation", planValidationNodeAsync)
                 .addEdge(START, "intent_router")
                 .addEdge("simple_chat", END)
                 .addEdge("circular_information_extractor", "research_agent")
                 .addEdge("research_agent", "plan_generator")
-                .addEdge("plan_generator", END);
+                .addEdge("plan_generator", "plan_validation")
+                .addEdge("policy_node", END);
 
-        // 添加条件边（基于节点返回的 next_node）
         workflow.addConditionalEdges("intent_router",
-                edge_async(state -> {
-                    return (String) state.value("next_node").orElse("simple_chat");
-                }),
+                edge_async(state -> (String) state.value("next_node").orElse("simple_chat")),
                 Map.of(
                         "simple_chat", "simple_chat",
+                        "policy_node", "policy_node",
                         "circular_information_extractor", "circular_information_extractor"
                 ));
 
-        // 配置内存保存器（用于状态持久化）
-        var saver = new MemorySaver();
+        workflow.addConditionalEdges("plan_validation",
+                edge_async(state -> (String) state.value("next_node").orElse("end")),
+                Map.of(
+                        "plan_generator", "plan_generator",
+                        "end", END
+                ));
 
-        var compileConfig = CompileConfig.builder()
+        CompileConfig compileConfig = CompileConfig.builder()
                 .saverConfig(SaverConfig.builder()
-                        .register(saver)
+                        .register(graphCheckpointSaver)
                         .build())
-                // 不再需要 interruptBefore 配置，中断由 InterruptableAction 控制
                 .build();
 
         return workflow.compile(compileConfig);
     }
-
 }

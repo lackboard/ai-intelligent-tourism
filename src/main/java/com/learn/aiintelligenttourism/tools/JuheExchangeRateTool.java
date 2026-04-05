@@ -4,7 +4,6 @@ package com.learn.aiintelligenttourism.tools;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
-import org.springframework.web.client.RestClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -43,7 +42,7 @@ public class JuheExchangeRateTool {
             map.put("to", to);
             map.put("version", "2");
 
-            return JuheApi.callApi(API_URL,map);
+            return HttpApiClient.callApi(API_URL,map);
 
         } catch (Exception e) {
             // 如果出错，返回错误信息给大模型，让大模型告诉用户“查询失败”

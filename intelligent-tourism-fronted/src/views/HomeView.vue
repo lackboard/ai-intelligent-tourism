@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, reactive } from 'vue';
 import { useRouter } from 'vue-router';
-import { BoltIcon, CubeTransparentIcon } from '@heroicons/vue/24/outline';
+import { BoltIcon, CubeTransparentIcon, BookmarkIcon } from '@heroicons/vue/24/outline';
 import { useChatStore } from '@/stores/chat';
+import { useItineraryStore } from '@/stores/itinerary';
 import type { ChatMode } from '@/types/chat';
 import ParticleBackground from '@/components/particles/ParticleBackground.vue';
 import MouseFollowParticles from '@/components/particles/MouseFollowParticles.vue';
@@ -10,15 +11,17 @@ import { useRandomBackground } from '@/composables/useRandomBackground';
 
 const router = useRouter();
 const chatStore = useChatStore();
+const itineraryStore = useItineraryStore();
 const { backgroundUrl, isLoading: bgLoading } = useRandomBackground();
 
 // 卡片 3D 倾斜效果
 const card1Ref = ref<HTMLButtonElement | null>(null);
 const card2Ref = ref<HTMLButtonElement | null>(null);
-const card1Style = ref({});
-const card2Style = ref({});
+type CardStyle = Record<string, string>;
+const card1Style = reactive<CardStyle>({});
+const card2Style = reactive<CardStyle>({});
 
-const handleMouseMove = (event: MouseEvent, cardRef: HTMLButtonElement | null, styleRef: typeof card1Style) => {
+const handleMouseMove = (event: MouseEvent, cardRef: HTMLButtonElement | null, style: CardStyle) => {
   if (!cardRef) return;
   
   const rect = cardRef.getBoundingClientRect();
@@ -30,17 +33,13 @@ const handleMouseMove = (event: MouseEvent, cardRef: HTMLButtonElement | null, s
   const rotateX = (y - centerY) / 10;
   const rotateY = (centerX - x) / 10;
   
-  styleRef.value = {
-    transform: `perspective(1000px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) translateZ(10px)`,
-    transition: 'transform 0.1s ease-out'
-  };
+  style.transform = `perspective(1000px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) translateZ(10px)`;
+  style.transition = 'transform 0.1s ease-out';
 };
 
-const handleMouseLeave = (styleRef: typeof card1Style) => {
-  styleRef.value = {
-    transform: 'perspective(1000px) rotateX(0deg) rotateY(0deg) translateZ(0px)',
-    transition: 'transform 0.5s ease-out'
-  };
+const handleMouseLeave = (style: CardStyle) => {
+  style.transform = 'perspective(1000px) rotateX(0deg) rotateY(0deg) translateZ(0px)';
+  style.transition = 'transform 0.5s ease-out';
 };
 
 const handleSelect = (mode: ChatMode) => {
@@ -208,6 +207,19 @@ const handleSelect = (mode: ChatMode) => {
       <!-- 底部装饰线 -->
       <div class="mt-16 w-24 h-[1px] bg-gradient-to-r from-transparent via-white/60 to-transparent animate-fade-in-up" />
     </section>
+
+    <!-- 我的行程悬浮按钮 -->
+    <button
+      v-if="itineraryStore.savedItineraries.length > 0"
+      @click="router.push('/my-itineraries')"
+      class="fixed bottom-8 right-8 z-50 flex items-center gap-2 px-5 py-3 rounded-full bg-white/90 backdrop-blur-lg text-slate-800 font-medium shadow-xl shadow-black/10 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 border border-white/50"
+    >
+      <BookmarkIcon class="h-5 w-5 text-emerald-500" />
+      <span>我的行程</span>
+      <span class="flex items-center justify-center h-5 min-w-[20px] px-1.5 rounded-full bg-emerald-500 text-white text-xs font-bold">
+        {{ itineraryStore.savedItineraries.length }}
+      </span>
+    </button>
 
     <!-- Footer -->
     <footer class="absolute bottom-0 inset-x-0 z-10 py-6 text-center">

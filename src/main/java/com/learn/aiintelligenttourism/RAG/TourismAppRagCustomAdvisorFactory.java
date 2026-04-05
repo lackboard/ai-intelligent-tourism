@@ -14,6 +14,7 @@ import org.springframework.ai.rag.retrieval.search.DocumentRetriever;
 import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.stereotype.Component;
 
@@ -23,6 +24,7 @@ public class TourismAppRagCustomAdvisorFactory {
 
 
     @Autowired
+    @Qualifier("knowledgeVectorStore")
     private VectorStore vectorStore;
 
     @Autowired

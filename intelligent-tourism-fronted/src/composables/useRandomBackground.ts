@@ -1,4 +1,4 @@
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted } from 'vue';
 
 // PC端背景图列表
 const pcBackgrounds = [

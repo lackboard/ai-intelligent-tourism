@@ -86,6 +86,9 @@ public class HumanInTheLoopTourismApp {
 
 	@Autowired
 	VectorStore vectorStore;
+
+	@Autowired
+	private IntentRecognitionService intentRecognitionService;
 	private Advisor tourismAppRagCustomAdvisor ;
 
 
@@ -262,7 +265,7 @@ public class HumanInTheLoopTourismApp {
 
 
 		// 意图路由节点
-		var intentRouterNode = AsyncNodeActionWithConfig.node_async(new IntentRouterNode(chatClient));
+		var intentRouterNode = AsyncNodeActionWithConfig.node_async(new IntentRouterNode(intentRecognitionService));
 		// 仅聊天节点
 		var simpleChatNode = AsyncNodeActionWithConfig.node_async(new SimpleChatNode(chatClient));
 

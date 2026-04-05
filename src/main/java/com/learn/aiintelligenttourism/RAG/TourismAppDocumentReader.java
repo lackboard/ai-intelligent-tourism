@@ -38,7 +38,7 @@ public class TourismAppDocumentReader {
         List<Document> documents = new ArrayList<Document>();
 
         try {
-            Resource[] resources = resolver.getResources("classpath*:document/*.md");
+            Resource[] resources = resolver.getResources("classpath*:document/intent/*.md");
             for (Resource resource : resources) {
                 String filename = resource.getFilename();
                 assert filename != null;
@@ -78,7 +78,6 @@ public class TourismAppDocumentReader {
      */
     private Map<String, Object> extractFrontMatter(Resource resource) {
         Map<String, Object> metadata = new HashMap<>();
-
 
 
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(resource.getInputStream(), StandardCharsets.UTF_8))) {

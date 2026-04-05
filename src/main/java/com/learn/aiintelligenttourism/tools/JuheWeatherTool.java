@@ -6,7 +6,6 @@ import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
 
 import java.util.HashMap;
 
@@ -42,7 +41,7 @@ public class JuheWeatherTool {
             map.put("city", city);
 
 
-            return JuheApi.callApi(API_URL, map);
+            return HttpApiClient.callApi(API_URL, map);
 
         } catch (Exception e) {
             // 如果出错，返回错误信息给大模型，让大模型告诉用户“查询失败”

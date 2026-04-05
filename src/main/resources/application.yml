@@ -14,6 +14,14 @@ spring:
         repository:
           jdbc:
             initialize-schema: always
+      observations:
+        log-prompt: true
+        log-completion: true
+    dashscope:
+      embedding:
+        options:
+          dimensions: 1536
+          model: text-embedding-v4
     vectorstore:
       pgvector:
         index-type: HNSW
@@ -21,10 +29,31 @@ spring:
         distance-type: COSINE_DISTANCE
         max-document-batch-size: 10000
         initialize-schema: true
+#      observations:
+#        log-query-response: true
 
-
+  kafka:
+    bootstrap-servers: 127.0.0.1:9092
+    producer:
+      acks: all # 【简历亮点】要求所有ISR副本Broker全部确认写入，保证生产端消息绝对不丢
+      retries: 3 # 【重试防御】应对偶尔的网络抖动，自动重试 3 次
+      properties:
+        enable.idempotence: true # 【生产幂等】保证开启重试后，消息即使因网络重发也不会在Broker端重复
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      group-id: memory-consumer-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false # 【核心】关闭Kafka原生无脑轮询提交，避免处理异常时消息依旧被确认丢失
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.learn.aiintelligenttourism.memory.event" # 【安全防护】仅反序列化这包下的实体
+    listener:
+      ack-mode: record # 【精确ACK】使用 Spring Kafka 托管，消费完一条（不出错）才立刻手工对应 ACK 一条
+      concurrency: 6 # 【并发匹配】在此统一声明启动 6 个消费线程，与各 Topic 设计好的 partition: 6 对齐
 server:
-  port: 8123
+  port: 8120
   servlet:
     context-path: /api
 
@@ -50,3 +79,63 @@ knife4j:
 logging:
   level:
     org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor: debug
+
+intent-recognition:
+  model: qwen-plus
+  rag-enabled: true
+  top-k: 6
+  similarity-threshold: 0.55
+  max-case-length: 80
+  keyword-fallback-enabled: true
+  plan-keywords:
+    - "规划"
+    - "行程"
+    - "安排"
+    - "路线"
+    - "几日游"
+    - "攻略计划"
+  policy-keywords:
+    - "政策"
+    - "预约"
+    - "开放"
+    - "闭园"
+    - "限流"
+    - "入园"
+    - "通行"
+    - "退改"
+    - "门票规则"
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+
+  observations:
+    annotations:
+      enabled: true
+    enable:
+      "http.server.requests": false
+      "http.client.requests": false
+
+otel:
+  traces:
+    exporter: otlp
+  metrics:
+    exporter: none
+  logs:
+    exporter: none
+
+  instrumentation:
+    spring-webmvc:
+      enabled: false
+    spring-web:
+      enabled: false
+
+  exporter:
+    otlp:
+      protocol: http/protobuf
+      traces:
+        endpoint: xxxxxxxxxxxxxxxxxxxx
+        headers:
+          Authorization: xxxxxxxxxxxxxxxxxxxxxxx
+          x-langfuse-ingestion-version: "4"

@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router';
 import HomeView from '@/views/HomeView.vue';
 import ChatView from '@/views/ChatView.vue';
+import MyItinerariesView from '@/views/MyItinerariesView.vue';
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,11 @@ const router = createRouter({
       path: '/chat',
       name: 'chat',
       component: ChatView,
+    },
+    {
+      path: '/my-itineraries',
+      name: 'my-itineraries',
+      component: MyItinerariesView,
     },
   ],
   scrollBehavior() {

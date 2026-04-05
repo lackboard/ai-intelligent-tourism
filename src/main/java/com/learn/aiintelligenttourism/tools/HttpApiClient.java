@@ -3,7 +3,6 @@ package com.learn.aiintelligenttourism.tools;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -11,7 +10,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 
-public class JuheApi {
+public class HttpApiClient {
 
     public static String callApi(String apiUrl,Map<String, String> map) throws IOException {
 

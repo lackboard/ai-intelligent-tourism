@@ -2,34 +2,39 @@ package com.learn.aiintelligenttourism.agent;
 
 import com.alibaba.cloud.ai.graph.KeyStrategy;
 import com.alibaba.cloud.ai.graph.KeyStrategyFactory;
-import com.alibaba.cloud.ai.graph.state.strategy.AppendStrategy;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
+import com.learn.aiintelligenttourism.memory.MemoryConstants;
+import com.learn.aiintelligenttourism.memory.MemoryPromptSupport;
 
 import java.util.HashMap;
 
-public class TourismAppKeyStrategyFactory{
-    // 配置状态键策略
+public class TourismAppKeyStrategyFactory {
+
     public static KeyStrategyFactory createKeyStrategyFactory() {
         return () -> {
             HashMap<String, KeyStrategy> strategies = new HashMap<>();
-            // 原始输入
+
             strategies.put("userMessage", new ReplaceStrategy());
-            strategies.put("chatId", new ReplaceStrategy());
-            // 2. 意图分类 (CHAT / PLAN)
+            strategies.put("visitorId", new ReplaceStrategy());
+            strategies.put("threadId", new ReplaceStrategy());
             strategies.put("intent", new ReplaceStrategy());
-            // 3. 提取到的关键信息 (槽位)，规划相关
-            strategies.put("travelRequirements", new ReplaceStrategy());  // 旅游信息
-
-            // 4. 工具调用结果
+            // 保存意图判定证据，方便 checkpoint 追踪与 bad case 回放。
+            strategies.put("intent_recall_cases", new ReplaceStrategy());
+            strategies.put("intent_raw_output", new ReplaceStrategy());
+            strategies.put("travelRequirements", new ReplaceStrategy());
+            strategies.put("pendingQuestion", new ReplaceStrategy());
             strategies.put("searchResults", new ReplaceStrategy());
-            // 5. 最终产物
-            strategies.put("itinerary", new ReplaceStrategy()); // 结构化行程单
-            strategies.put("finalResponse", new ReplaceStrategy()); // 给用户的自然语言回复
-
-
-            strategies.put("messages", new AppendStrategy()); // 会话记录
+            strategies.put("itinerary", new ReplaceStrategy());
+            strategies.put("finalResponse", new ReplaceStrategy());
+            strategies.put("validationPassed", new ReplaceStrategy());
+            strategies.put("validationFeedback", new ReplaceStrategy());
+            strategies.put("retryCount", new ReplaceStrategy());
             strategies.put("next_node", new ReplaceStrategy());
+            strategies.put(MemoryPromptSupport.MEMORY_CONTEXT_PROMPT_KEY, new ReplaceStrategy());
+            strategies.put(MemoryPromptSupport.CURRENT_TURN_USER_MESSAGE_PERSISTED_KEY, new ReplaceStrategy());
 
+            // Graph checkpoint 里只保留最近几轮自然语言对话，避免状态无限增长。
+            strategies.put("messages", new BoundedMessageAppendStrategy(MemoryConstants.WORKING_MEMORY_WINDOW_SIZE));
 
             return strategies;
         };
